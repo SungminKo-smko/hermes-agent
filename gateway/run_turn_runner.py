@@ -141,6 +141,9 @@ def _resolution_failure_reply(exc: Exception, platform: Platform) -> tuple[str, 
     from hermes_cli.auth import AuthError, is_rate_limited_auth_error
     from hermes_state_runtime import RuntimeStoreError
     auth_permanent = FailoverReason.auth_permanent.value
+    from gateway.channel_routing import ChannelRouteError
+    if isinstance(exc, ChannelRouteError):
+        return str(exc), auth_permanent, False
     if isinstance(exc, RuntimeStoreError):
         # Session-policy refusals carry a stable reason code (e.g. a CLI launch key revoked by
         # daemon restart): keep it in the reply so clients can act on it, and do not suggest
@@ -465,10 +468,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
         agent.event_callback = ctx._event_callback_sync
         agent.reasoning_config, agent.service_tier = reasoning_config, runner._service_tier
         self._merge_turn_request_overrides(agent, turn_route)
-        from gateway.session_surface import arm_surface_turn
-        # auxiliary.voice_chat route (a voice note, or an admission committed as a voice turn) and
-        # this turn's must-deliver notes; a managed worker arms its agent through the same helper.
-        arm_surface_turn(agent, runner._consume_pending_turn_sidecar_notes(ctx.session_key), voice_turn=ctx.voice_turn)
+        from gateway.channel_routing import arm_channel_surface_turn
+        arm_channel_surface_turn(
+            runner, ctx.source, agent, runner._consume_pending_turn_sidecar_notes(ctx.session_key),
+            voice_turn=ctx.voice_turn)
         agent.background_review_callback, bg_release = self._make_bg_review_callbacks()
         # Register the release hook on the adapter so base.py's finally block fires it after the
         # main response is delivered.
@@ -1237,28 +1240,16 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             max_iterations = room.max_iterations
             ctx.enabled_toolsets = list(room.enabled_toolsets)
         try:
-            model, runtime_kwargs = runner._resolve_session_agent_runtime(
-                source=ctx.source, session_key=ctx.session_key, user_config=ctx.user_config,
-            )
-            # Stashed by _resolve_session_agent_runtime when the primary's credentials failed and a
-            # fallback was resolved before any agent exists (#74349); one-shot per turn.
-            pending_fallback_notice = getattr(runner, "_pre_agent_fallback_notice", None)
-            runner._pre_agent_fallback_notice = None
-            from gateway.session_api_turn import prepare_api_runtime
-            model, runtime_kwargs = prepare_api_runtime(model, runtime_kwargs)
-            if policy and policy.model and not pending_fallback_notice:
-                # The frozen route's model, unless resolution just fell back: the fallback entry's
-                # model is the one this agent must send (#112600).
-                from gateway.session_authorities import active_authority
-                model = policy.current_model(active_authority(runner))
-            # The classic CLI's `/model --once` / `/moa`: this admission only, nothing persisted.
-            from gateway.session_cli_turn import one_turn_route
-            model, runtime_kwargs = one_turn_route(self, policy, model, runtime_kwargs)
+            from gateway.channel_routing import resolve_turn_runtime
+            model, runtime_kwargs, pending_fallback_notice = resolve_turn_runtime(self, policy)
             logger.debug(
                 "run_agent resolved: model=%s provider=%s session=%s",
                 model, runtime_kwargs.get("provider"), ctx.session_key or "",
             )
         except Exception as exc:
+            from gateway.channel_routing import ChannelRouteError, channel_policy
+            if channel_policy(runner, ctx.source) is not None and not isinstance(exc, ChannelRouteError):
+                raise
             # Model/credential resolution failed before the turn began; the raw text (URLs, status
             # codes) belongs in the log, and the chat gets the commands that fix it. The result is
             # a FAILED turn: a one-shot client exits non-zero, transcript persistence closes the
@@ -1313,8 +1304,10 @@ class TurnRunner(GatewayTurnProgressMixin, GatewaySessionAgentMixin):
             from gateway.session_secret_prompt import secret_prompt_scope
             from gateway.session_sudo_prompt import sudo_prompt_scope
             with sudo_prompt_scope(self, agent), secret_prompt_scope(self, agent):
-                result = run_classic_cli_turn(self, lambda: self._run_conversation_with_approval(
-                    agent, agent_history, observed_group_context, persist_msg, persist_ts))
+                from gateway.channel_routing import finish_channel_result
+                result = run_classic_cli_turn(self, lambda: finish_channel_result(
+                    runner, ctx.source, self._run_conversation_with_approval(
+                        agent, agent_history, observed_group_context, persist_msg, persist_ts), agent))
         finally:
             if local_sinks is not None:
                 from gateway import local_viewer_events
