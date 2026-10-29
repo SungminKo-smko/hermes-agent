@@ -64,8 +64,14 @@ def _resolve_policy_agent_runtime(runner, policy, *, fallback=True) -> tuple[str
     return model, _runtime_agent_kwargs(runtime)
 
 
-def _recover_or_remember_model(runner, skey, model):
-    """Last step of ``_resolve_session_agent_runtime``: remember a good model, recover an empty one."""
+def _recover_or_remember_model(runner, skey, model, runtime_kwargs):
+    """기존 채널의 카탈로그 기본값과 마지막 정상 모델 복구를 처리한다."""
+    if not model and runtime_kwargs.get("provider"):
+        with suppress(Exception):
+            from hermes_cli.models import get_default_model_for_provider
+            model = get_default_model_for_provider(runtime_kwargs["provider"])
+            if model:
+                logger.info("No model configured — defaulting to %s for provider %s", model, runtime_kwargs["provider"])
     # Final safety net: an empty model (transient config-cache miss) makes every API call 400 and
     # the session goes silent — reuse the last model resolved for this session, else process-wide.
     if not model:
@@ -95,11 +101,11 @@ class GatewayTurnPrepareMixin:
         self, *, source: Optional[SessionSource] = None, session_key: Optional[str] = None,
         user_config: Optional[dict] = None, fallback: bool = True,
     ) -> tuple[str, dict]:
-        """Resolve model/runtime for a session.
+        """명시적 채널 대체 정책이 있으면 그 닫힌 경로만 사용한다.
 
-        Priority (highest first): session ``/model`` → ``channel_overrides`` → global config/env
-        (``_resolve_gateway_model(user_config)`` and default provider resolution). ``fallback=False``
-        keeps a launch-policy session on its own route (see ``_resolve_policy_agent_runtime``)."""
+        미지정 채널의 우선순위는 기존대로 세션 /model → 채널 → 전역이다.
+        fallback=False는 지정 경로의 준비 단계 대체를 비활성화한다.
+        """
         from gateway.run import (
             _credential_pool_for_provider, _get_channel_override, _resolve_gateway_model,
             _resolve_runtime_agent_kwargs, _resolve_runtime_agent_kwargs_for_provider,
@@ -108,7 +114,14 @@ class GatewayTurnPrepareMixin:
         # Every exit path starts clean: a stale notice must never attach to another session's next
         # turn (#74349). Set again below only when THIS resolution fell back.
         self._pre_agent_fallback_notice = None
+        from gateway.channel_routing import channel_policy, resolve_channel_runtime
+        channel = channel_policy(self, source)
         policy = policy_for_source(self, source) if source is not None else None
+        if channel is not None:
+            if policy is not None:
+                from gateway.channel_routing import resolve_policy_channel_runtime
+                return resolve_policy_channel_runtime(self, channel, policy)
+            return resolve_channel_runtime(self, channel, fallback=fallback)
         if policy is not None:
             return _resolve_policy_agent_runtime(self, policy, fallback=fallback)
         skey = self._resolve_session_key_or_none(source, session_key)
@@ -197,18 +210,7 @@ class GatewayTurnPrepareMixin:
         if override and skey:
             model, runtime_kwargs = self._apply_session_model_override(skey, model, runtime_kwargs)
 
-        # Provider resolved but no model.default (`hermes auth add` without `hermes model`): use the
-        # provider's first catalog model.
-        if not model and runtime_kwargs.get("provider"):
-            with suppress(Exception):
-                from hermes_cli.models import get_default_model_for_provider
-                model = get_default_model_for_provider(runtime_kwargs["provider"])
-                if model:
-                    logger.info(
-                        "No model configured — defaulting to %s for provider %s", model, runtime_kwargs["provider"],
-                    )
-
-        return _recover_or_remember_model(self, skey, model), runtime_kwargs
+        return _recover_or_remember_model(self, skey, model, runtime_kwargs), runtime_kwargs
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         """Effective model/runtime config for one turn. With `/fast` priority on, fast-mode
@@ -229,6 +231,7 @@ class GatewayTurnPrepareMixin:
         route = {
             "model": model,
             "runtime": runtime,
+            "_channel_route_index": runtime_kwargs.get("_channel_route_index"),
             "signature": (
                 model, runtime["provider"], runtime["requested_provider"], runtime["base_url"],
                 runtime["api_mode"], runtime["command"], tuple(runtime["args"]),

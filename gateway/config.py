@@ -377,17 +377,24 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
 
 @dataclass
 class ChannelOverride:
-    """Per-channel model/provider/system_prompt override (``platforms.<name>.channel_overrides[channel_id]``)."""
+    """채널별 모델/공급자/프롬프트 및 명시적인 닫힌 대체 정책."""
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
+    # None은 미지정이며 []는 대체 금지다. 잘못된 값도 보존하여 닫힌 정책으로 거절한다.
+    fallback_providers: Any = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ChannelOverride":
-        return cls(**{f.name: data.get(f.name) for f in fields(cls)}) if data else cls()
+        if not data:
+            return cls()
+        values = {f.name: data.get(f.name) for f in fields(cls)}
+        if "fallback_providers" in data and data["fallback_providers"] is None:
+            values["fallback_providers"] = False  # 명시적 null도 잘못된 정책이며 미지정이 아니다.
+        return cls(**values)
 
 
 # Platforms whose primary credential is ``PlatformConfig.token`` → its env var (empty-token

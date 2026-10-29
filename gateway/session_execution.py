@@ -151,6 +151,7 @@ class GatewaySessionAgentMixin:
     def _build_fresh_agent(self, turn_route, platform_key, combined_ephemeral, max_iterations,
                            reasoning_config, pr, skip_context_files):
         from gateway.run import _checkpoint_agent_kwargs
+        from gateway.channel_routing import agent_fallback_chain
         ctx = self._ctx
         runner = self._runner
         src = ctx.source
@@ -177,7 +178,7 @@ class GatewaySessionAgentMixin:
             session_db=getattr(runner._session_db, "_db", runner._session_db),
             # Reload from disk — do not reuse the startup snapshot.
             # See #60955.
-            fallback_model=None if api_runtime_locked() else self._runner._refresh_fallback_model(),
+            fallback_model=None if api_runtime_locked() else agent_fallback_chain(runner, src, turn_route),
             skip_context_files=skip_context_files,
             # Keep the persona even with minimal context: soul identity is one small file.
             load_soul_identity=not bool(policy and policy.ignore_rules),
@@ -210,14 +211,19 @@ class GatewaySessionAgentMixin:
         # Lock released — refresh the reused agent's fallback chain from disk OUTSIDE the cache lock
         # (disk I/O under the lock stalls the idle-sweep watcher and Discord heartbeats). A chain
         # configured after caching must reach the next turn; per-session serialization keeps it safe.
+        from gateway.channel_routing import agent_fallback_chain, channel_policy
         locked = api_runtime_locked() is not None
-        if found.reused and agent is not None and locked and getattr(agent, "_fallback_activated", False):
-            # A cached agent already moved onto a fallback provider cannot serve a confirmed lock.
+        strict = channel_policy(runner, ctx.source) is not None
+        if found.reused and agent is not None and (locked or strict) and (
+                getattr(agent, "_fallback_activated", False)
+                or (strict and (agent.model, agent.provider) != (turn_route["model"], turn_route["runtime"]["provider"]))):
+            # 활성 대체/cooldown은 명시적 채널 정책이나 API 잠금을 우회할 수 없다.
             found.evicted, found.reused, agent = agent, False, None
             with cache_lock:
                 cache.pop(ctx.session_key, None)
         if found.reused and agent is not None:
-            self._runner._apply_fallback_chain_to_agent(agent, None if locked else runner._refresh_fallback_model())
+            self._runner._apply_fallback_chain_to_agent(
+                agent, None if locked else agent_fallback_chain(runner, ctx.source, turn_route))
         if found.evicted is not None:
             self._release_evicted_agent(found.evicted)
         if agent is None:

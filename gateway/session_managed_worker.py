@@ -40,20 +40,25 @@ def managed_policy(authority, ref):
     The frozen creation snapshot, not current profile config, chooses execution.
     """
     from gateway.session_policy import policy_for_source
+    from gateway.channel_routing import require_managed_channel_support
     policy = policy_for_source(authority.runner, authority.sessions[ref.session_id].source)
     if policy is None:
         return None
     if policy.ignore_user_config or policy.kanban_json is not None:
+        require_managed_channel_support(authority, ref)
         return policy
     if policy.config().get('gateway', {}).get('managed_workers') is not True:
         return None
     request = json.loads(policy.request_json)
     if policy.platform != 'cli' or request.get('provider') != 'custom' or not request.get('base_url'):
         raise RuntimeStoreError('unsupported_managed_policy')
+    require_managed_channel_support(authority, ref)
     return policy
 
 
 def _bootstrap(authority, ref, row, policy, scope, text=None):
+    from gateway.channel_routing import require_managed_channel_support
+    require_managed_channel_support(authority, ref)
     from gateway.session_ingress import row_turn_author
     from gateway.session_policy import route_launch_key
     from gateway.session_policy_credentials import recover_config_secrets
