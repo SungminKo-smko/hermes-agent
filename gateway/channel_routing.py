@@ -17,6 +17,16 @@ def channel_policy(runner, source):
     config = getattr(runner, "config", None)
     if config is None or source is None:
         return None
+    if getattr(config, "multiplex_profiles", False):
+        from gateway.session_identity import canonical_identity, IdentityUnresolved
+        identity = canonical_identity(source, runner=runner)
+        if identity is None:
+            raise IdentityUnresolved("channel policy requires a resolved runtime profile")
+        primary = getattr(runner, "_primary_profile_name", None) or "default"
+        if identity.runtime_profile != primary:
+            config = (getattr(runner, "_profile_configs", None) or {}).get(identity.runtime_profile)
+            if config is None:
+                raise IdentityUnresolved("channel policy runtime profile is not served")
     override = _get_channel_override(
         config, source.platform, str(source.chat_id or ""),
         thread_id=str(source.thread_id) if source.thread_id else None,
@@ -25,6 +35,14 @@ def channel_policy(runner, source):
     if override is None or override.fallback_providers is None:
         return None
     return override
+
+
+def require_managed_channel_support(authority, ref):
+    """Managed workers cannot enforce closed channel routes yet; refuse before spawning/bootstrapping."""
+    source = authority.sessions[ref.session_id].source
+    if channel_policy(authority.runner, source) is not None:
+        from hermes_state_runtime import RuntimeStoreError
+        raise RuntimeStoreError("unsupported_managed_channel_policy")
 
 
 def channel_entries(override):

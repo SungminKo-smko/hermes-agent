@@ -48,6 +48,13 @@ platforms:
   받으므로 custom endpoint는 이름 있는 공급자로 등록해야 합니다.
   명시적 정책은 우선 모델에도 provider/model 쌍이 필요합니다.
   파싱된 `null`은 직렬화 시 `false`로 보존되어 미지정으로 바뀌지 않습니다.
+- 다중 프로필에서는 수신 봇의 프로필이 아니라 canonical `RoutingIdentity.runtime_profile`의
+  채널 선언을 조회합니다. 보조 프로필은 해당 `_profile_configs` 설정을 사용하며 같은 채널 ID의
+  주 프로필 정책을 상속하지 않습니다. 서비스하지 않는 프로필이나 미해결 identity는 거절합니다.
+- **LOCAL 관리형 워커 + 명시적 채널 정책은 현재 지원하지 않습니다.** `[]`도 포함하며
+  `unsupported_managed_channel_policy`로 워커 선택/생성 전에 거절하고 bootstrap에서도 재검증합니다.
+  전역·frozen 대체 체인을 넘기는 우회 경로로 실행하지 않습니다. 채널 정책 미지정 LOCAL의
+  기존 관리형 실행과 비관리형 LOCAL의 launch/채널 검증은 유지합니다.
 - 채널 조회는 기존과 같이 chat ID → thread ID → parent ID 순으로 첫 일치 항목을
   사용합니다. 부모와 자식의 필드를 합치지 않습니다.
 - 준비 단계의 `AuthError`, 기존 분류기가 대체 가능하다고 판정한 429 등의 오류만
@@ -104,3 +111,10 @@ platforms:
 준비 후 남은 체인, 다른 채널의 기존 동작을 검증합니다. 실제 `AIAgent`의 요청/분류/대체
 경로는 HTTP 전송 경계만 가짜로 바꾸어 검증하며 유료 공급자에 연결하지 않습니다.
 테스트 실행은 항상 `scripts/run_tests.sh`를 사용합니다.
+
+`test_channel_profile_policy.py`는 실제 profile 디렉터리·canonical identity·runtime scope를 거쳐
+주/보조 프로필의 상충·미지정 정책과 다른 프로필 비영향, 미서비스 프로필 거절을 검증합니다.
+`test_channel_managed_policy.py`는 실제 LOCAL 어댑터의 policy 선택과 bootstrap을 검증하고,
+격리된 daemon/관리형 자식 프로세스/loopback 모델로 기존 세션 복구를 시험합니다. 정책 미지정
+턴은 실제 워커와 모델 요청까지 완료하며, 재시작 후 명시적 정책이 있는 턴은 추가 워커 생성과
+모델 요청 없이 실패로 확정되어야 합니다. 이는 운영 재시작이나 실제 Slack/유료 공급자 E2E가 아닙니다.
